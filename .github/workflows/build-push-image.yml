@@ -1,0 +1,164 @@
+name: Build and push image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v1.0.0)'
+        required: true
+        default: ''
+      push:
+        description: 'Push to Tencent CCR（正式发布请走 GitHub Release；此处默认不推送）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-push-image-${{ github.workflow }}-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ccr.ccs.tencentyun.com
+  NAMESPACE: solat
+  IMAGE_NAME: tracking-service
+  # 与 docker-library 对齐的基础镜像，避免 CI 拉 Docker Hub
+  GOLANG_IMAGE: ccr.ccs.tencentyun.com/solat/golang:1.25-alpine
+  ALPINE_IMAGE: ccr.ccs.tencentyun.com/solat/alpine:3.20
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1 -race
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Resolve version tags
+        id: meta
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            RAW="${{ github.event.release.tag_name }}"
+            DO_PUSH=true
+          else
+            RAW="${{ inputs.tag }}"
+            DO_PUSH="${{ inputs.push }}"
+          fi
+
+          if [[ -z "${RAW}" ]]; then
+            echo "缺少 release tag" >&2
+            exit 1
+          fi
+
+          case "${RAW}" in
+            v*) VERSION_TAG="${RAW}"; VERSION_NOPREFIX="${RAW#v}" ;;
+            *)  VERSION_TAG="v${RAW}"; VERSION_NOPREFIX="${RAW}" ;;
+          esac
+
+          if [[ ! "${VERSION_NOPREFIX}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "Invalid version tag: ${RAW} (expect semver like v1.2.3)" >&2
+            exit 1
+          fi
+
+          IMAGE="${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}"
+          {
+            echo "version_tag=${VERSION_TAG}"
+            echo "version_noprefix=${VERSION_NOPREFIX}"
+            echo "image=${IMAGE}"
+            echo "do_push=${DO_PUSH}"
+            echo "tags<<EOF"
+            echo "${IMAGE}:${VERSION_TAG}"
+            echo "${IMAGE}:${VERSION_NOPREFIX}"
+            if [[ "${{ github.event_name }}" == "release" && "${{ github.event.release.prerelease }}" != "true" ]]; then
+              echo "${IMAGE}:latest"
+            fi
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Building ${IMAGE}:${VERSION_TAG} (push=${DO_PUSH})"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.meta.outputs.version_tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Decide platforms
+        id: push
+        run: |
+          if [[ "${{ steps.meta.outputs.do_push }}" == "true" ]]; then
+            echo "push=true" >> "${GITHUB_OUTPUT}"
+            echo "platforms=linux/amd64,linux/arm64" >> "${GITHUB_OUTPUT}"
+          else
+            echo "push=false" >> "${GITHUB_OUTPUT}"
+            echo "platforms=linux/amd64" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # 构建阶段只 pull 基础镜像；solat 命名空间若为私有，同样需要先登录
+      - name: Login to Tencent CCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.TENCENT_REGISTRY_USERNAME }}
+          password: ${{ secrets.TENCENT_REGISTRY_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ steps.push.outputs.platforms }}
+          push: ${{ steps.push.outputs.push == 'true' }}
+          load: ${{ steps.push.outputs.push != 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            GOLANG_IMAGE=${{ env.GOLANG_IMAGE }}
+            ALPINE_IMAGE=${{ env.ALPINE_IMAGE }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version_noprefix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Summary
+        run: |
+          {
+            echo "## Image"
+            echo ""
+            echo "- Event: \`${{ github.event_name }}\`"
+            echo "- Tag: \`${{ steps.meta.outputs.version_tag }}\`"
+            echo "- Push: \`${{ steps.push.outputs.push }}\`"
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo ""
+            echo "Pull example:"
+            echo ""
+            echo '```bash'
+            echo "docker pull ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version_tag }}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

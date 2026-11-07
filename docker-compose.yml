@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tracking
+    ports:
+      - "5432:5432"
+    volumes:
+      - tracking_pg:/var/lib/postgresql/data
+
+  # Local S3-compatible OSS mock (Tencent COS / AWS S3 stand-in)
+  # Console: http://localhost:9101  (user/pass: rustfsadmin / rustfsadmin)
+  # S3 API:  http://localhost:9100  — create bucket "tracking" in console first
+  rustfs:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_VOLUMES: /data
+      RUSTFS_OBS_LOGGER_LEVEL: warn
+    ports:
+      # Host 9100 avoids clash with ClickHouse native :9000
+      - "9100:9000"
+      - "9101:9001"
+    volumes:
+      - tracking_rustfs:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Optional local ClickHouse for OLAP_ENABLED=true
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    profiles: ["olap"]
+
+volumes:
+  tracking_pg:
+  tracking_rustfs:
