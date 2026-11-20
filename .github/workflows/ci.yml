@@ -38,7 +38,8 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.5.0
+          # v2.5.0 is built with go1.25 and rejects go.mod go 1.26.0
+          version: v2.15.0
 
       - name: Test (race + coverage)
         run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...

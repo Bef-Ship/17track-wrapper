@@ -58,6 +58,6 @@ Set `SHIPMENT_CALLBACK_URL` to POST package updates to the backend (header `X-Tr
 | --- | --- | --- |
 | `CI` | PR / push `main` | gofmt, vet, golangci-lint, race tests, build |
 | `Docs` | push `main` (openapi) / manual | publish Redoc site to GitHub Pages |
-| `Release` | push `main` / GitHub Release / manual | build & push `ccr…/solat/tracking:<tag>` |
+| `Release` | push `vX.Y.Z` tag / GitHub Release / manual | build & push `ccr…/solat/tracking:vX.Y.Z` |
 
 Repo secrets: `CCR_USERNAME`, `CCR_PASSWORD`.

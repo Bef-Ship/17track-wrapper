@@ -1,11 +1,11 @@
 # 构建并推送 tracking 镜像到腾讯云 CCR
-# 镜像: ccr.ccs.tencentyun.com/solat/tracking:<tag>
+# 镜像: ccr.ccs.tencentyun.com/solat/tracking:vX.Y.Z
 # 镜像内单一二进制 /app/tracking：TRACKING_ROLE=api|worker|all；
 # /app/tracking-worker 是指向它的软链，默认 worker 角色（cron/asynq）
 #
-# push main          → tag=d-sha-<7位短 SHA>（测试/develop）
-# release published  → tag=<GitHub Release tag>（正式）
-# workflow_dispatch  → 手动重打已有 git tag
+# push tag vX.Y.Z    → tag=vX.Y.Z
+# release published  → tag=<GitHub Release tag>（须为 vX.Y.Z）
+# workflow_dispatch  → 手动重打已有 git tag（须为 vX.Y.Z）
 #
 # 仓库 Secrets:
 #   CCR_USERNAME  — 腾讯云账号 UIN / CCR 用户名
@@ -19,7 +19,8 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    tags:
+      - "v*.*.*"
   release:
     types: [published]
   workflow_dispatch:
@@ -33,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-tracking-${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+  group: release-tracking-${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -56,22 +57,23 @@ jobs:
             RAW="${{ github.event.release.tag_name }}"
             GIT_REF="refs/tags/${RAW#refs/tags/}"
           else
-            SHORT="$(echo '${{ github.sha }}' | cut -c1-7)"
-            RAW="d-sha-${SHORT}"
-            GIT_REF="${{ github.sha }}"
+            # push tags: v*.*.*
+            RAW="${{ github.ref_name }}"
+            GIT_REF="${{ github.ref }}"
           fi
           RAW="${RAW#refs/tags/}"
           if [ -z "$RAW" ]; then
             echo "empty release/tag" >&2
             exit 1
           fi
-          if [[ ! "$RAW" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "invalid image tag: $RAW" >&2
+          if [[ ! "$RAW" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "image tag must be semver like v1.2.3 (got: $RAW)" >&2
             exit 1
           fi
           echo "image_tag=$RAW" >> "$GITHUB_OUTPUT"
           echo "git_ref=$GIT_REF" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "release" ] && [ "${{ github.event.release.prerelease }}" != "true" ]; then
+          if { [ "${{ github.event_name }}" = "release" ] && [ "${{ github.event.release.prerelease }}" != "true" ]; } \
+            || { [ "${{ github.event_name }}" = "push" ] && [[ "$RAW" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }; then
             echo "tag_latest=true" >> "$GITHUB_OUTPUT"
           else
             echo "tag_latest=false" >> "$GITHUB_OUTPUT"
