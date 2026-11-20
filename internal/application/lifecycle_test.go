@@ -224,7 +224,7 @@ func (f *fakeSDK) Retrack(_ context.Context, items []sdk.TrackNumber) (*sdk.Acce
 	out := &sdk.AcceptedRejected[sdk.SimpleAccepted]{}
 	for _, it := range items {
 		f.retracked = append(f.retracked, it.Number)
-		out.Accepted = append(out.Accepted, sdk.SimpleAccepted{Number: it.Number, Carrier: it.Carrier})
+		out.Accepted = append(out.Accepted, sdk.SimpleAccepted(it))
 	}
 	return out, nil
 }

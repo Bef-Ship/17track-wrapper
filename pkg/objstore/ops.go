@@ -50,7 +50,7 @@ func (c *Client) List(ctx context.Context, prefix string) ([]Entry, error) {
 			return nil, err
 		}
 		for _, e := range page.Entries {
-			name := e.Key
+			var name string
 			if e.IsDir {
 				name = strings.TrimSuffix(strings.TrimPrefix(e.Key, prefix), "/")
 			} else {

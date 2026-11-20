@@ -66,7 +66,7 @@ func (n *Nop) GetTrackInfo(_ context.Context, items []sdk.TrackNumber) (*sdk.Acc
 func simpleAccepted(items []sdk.TrackNumber) *sdk.AcceptedRejected[sdk.SimpleAccepted] {
 	out := &sdk.AcceptedRejected[sdk.SimpleAccepted]{}
 	for _, it := range items {
-		out.Accepted = append(out.Accepted, sdk.SimpleAccepted{Number: it.Number, Carrier: it.Carrier})
+		out.Accepted = append(out.Accepted, sdk.SimpleAccepted(it))
 	}
 	return out
 }

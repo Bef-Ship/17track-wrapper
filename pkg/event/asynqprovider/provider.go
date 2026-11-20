@@ -135,7 +135,7 @@ func Ping(ctx context.Context, redisURL string) error {
 	if !ok {
 		return fmt.Errorf("asynq provider: unexpected redis client")
 	}
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := rdb.Ping(pctx).Err(); err != nil {

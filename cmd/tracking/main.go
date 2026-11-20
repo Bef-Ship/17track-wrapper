@@ -71,7 +71,7 @@ func main() {
 		wlog.Warn("event bus unavailable; register retries and callbacks run inline", "err", err.Error())
 	} else {
 		bus = b
-		defer b.Close()
+		defer func() { _ = b.Close() }()
 	}
 
 	track17Client := track17.WithSharedLimit(track17.NewClientForAppEnv(), rdb, "track17:ratelimit")

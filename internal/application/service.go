@@ -219,7 +219,7 @@ func applyBatch(pkg *domain.Package, batch domain.EventBatch) {
 	if batch.Weight != nil {
 		pkg.Weight = batch.Weight
 	}
-	pkg.ShippingDetail.Merge(batch.ShippingDetail)
+	pkg.Merge(batch.ShippingDetail)
 
 	merged := domain.Milestones{}
 	for _, ev := range batch.Events {

@@ -352,7 +352,7 @@ func (r *PostgresRepository) InsertEvents(ctx context.Context, events []domain.T
 		)
 	}
 	br := r.db.SendBatch(ctx, batch)
-	defer br.Close()
+	defer func() { _ = br.Close() }()
 	var inserted []domain.TrackingEvent
 	for _, ev := range events {
 		err := br.QueryRow().Scan(&ev.EventID, &ev.CreatedAt)
