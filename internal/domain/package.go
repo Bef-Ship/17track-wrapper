@@ -1,22 +1,21 @@
 package domain
 
-import "time"
+import (
+	"time"
 
-// Package is the minimal tracking unit. One package owns one tracking_number
-// (or shares one with siblings — uniqueness is still on tracking_number).
-// Shipment / order aggregation lives in upstream services via ExternalRef.
+	sdk "github.com/SolaTyolo/17track-sdk"
+)
+
+// Package is one generation of a tracking number: logistics state + 17TRACK
+// subscription. Carriers recycle numbers, so only the current generation
+// (SupersededAt == nil) is unique per tracking_number; older ones are history.
 type Package struct {
-	PackageID      int64    `json:"package_id"`
-	TenantID       string   `json:"tenant_id"`
-	TrackingNumber string   `json:"tracking_number"` // unique per tenant
-	CarrierCode    string   `json:"carrier_code"`
-	ProviderName   string   `json:"provider_name"`          // data source label set at registration, e.g. carrier_direct
-	ExternalRef    string   `json:"external_ref,omitempty"` // caller-owned id (order/shipment/…)
-	LabelURL       string   `json:"label_url,omitempty"`
-	Weight         *float64 `json:"weight,omitempty"` // kg
-	DimLength      *float64 `json:"dim_length,omitempty"`
-	DimWidth       *float64 `json:"dim_width,omitempty"`
-	DimHeight      *float64 `json:"dim_height,omitempty"`
+	PackageID      int64  `json:"package_id"`
+	TrackingNumber string `json:"tracking_number"`
+	// Carrier is the 17TRACK carrier key (0 = auto-detect, not yet resolved).
+	Carrier     int      `json:"carrier"`
+	ExternalRef string   `json:"external_ref,omitempty"`
+	Weight      *float64 `json:"weight,omitempty"`
 
 	Status        string `json:"status,omitempty"`
 	SubStatus     string `json:"sub_status,omitempty"`
@@ -35,12 +34,31 @@ type Package struct {
 	IsArchived     bool       `json:"is_archived"`
 	ArchiveKey     string     `json:"archive_key,omitempty"`
 	LatestUpdateAt *time.Time `json:"latest_update_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+
+	// Subscription control (17TRACK).
+	Tag                *string    `json:"tag,omitempty"`
+	SubscriptionStatus string     `json:"subscription_status"`
+	Source             string     `json:"source"`
+	IsRetracked        bool       `json:"is_retracked"`
+	CancelledAt        *time.Time `json:"cancelled_at,omitempty"`
+	// RegisterParams is the last /register request, replayed on retries.
+	RegisterParams sdk.RegisterItem `json:"register_params"`
+	// SupersededAt is set once a newer generation of the number was registered.
+	SupersededAt *time.Time `json:"superseded_at,omitempty"`
+
+	// Return detection.
+	HasReturn             bool       `json:"has_return"`
+	ReturnType            *string    `json:"return_type,omitempty"`
+	ReturnDetectSupported bool       `json:"return_detect_supported"`
+	ReturnDetectedAt      *time.Time `json:"return_detected_at,omitempty"`
+	ReturnCarrierEventID  *string    `json:"return_carrier_event_id,omitempty"`
+	LastCallbackAt        *time.Time `json:"last_callback_at,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// ShippingDetail is route / service metadata that can be set at registration
-// and refined by later tracking updates.
+// ShippingDetail is route / service metadata.
 type ShippingDetail struct {
 	Origin                 Address    `json:"origin"`
 	Destination            Address    `json:"destination"`
@@ -72,9 +90,10 @@ func (d *ShippingDetail) Merge(u ShippingDetail) {
 	}
 }
 
-// Address is a coarse location; street and coordinates are intentionally not stored.
+// Address is a coarse location; street is intentionally not stored (event coordinates
+// live on TrackingEvent).
 type Address struct {
-	Country    string `json:"country,omitempty"` // ISO 3166-1 alpha-2
+	Country    string `json:"country,omitempty"`
 	State      string `json:"state,omitempty"`
 	City       string `json:"city,omitempty"`
 	PostalCode string `json:"postal_code,omitempty"`
@@ -88,62 +107,53 @@ func (a *Address) Merge(u Address) {
 	setStr(&a.PostalCode, u.PostalCode)
 }
 
-// DefaultTenant is used when a request carries no tenant id.
-const DefaultTenant = "default"
-
-// Milestones maps a Stage* value to the time that stage was reached.
-type Milestones map[string]time.Time
-
-// Package status values. StatusRegistered is set before any tracking update;
-// the rest form the main tracking status of a package.
-const (
-	StatusRegistered         = "registered"
-	StatusNotFound           = "not_found"
-	StatusInfoReceived       = "info_received"
-	StatusInTransit          = "in_transit"
-	StatusExpired            = "expired"
-	StatusAvailableForPickup = "available_for_pickup"
-	StatusOutForDelivery     = "out_for_delivery"
-	StatusDeliveryFailure    = "delivery_failure"
-	StatusDelivered          = "delivered"
-	StatusException          = "exception"
-)
-
-var validStatuses = map[string]bool{
-	StatusRegistered: true, StatusNotFound: true, StatusInfoReceived: true,
-	StatusInTransit: true, StatusExpired: true, StatusAvailableForPickup: true,
-	StatusOutForDelivery: true, StatusDeliveryFailure: true, StatusDelivered: true,
-	StatusException: true,
-}
-
-// IsValidStatus reports whether s is a known package status.
-func IsValidStatus(s string) bool { return validStatuses[s] }
-
-// Milestone stages: key points of the shipping process, used by
-// Package.Milestones and TrackingEvent.Stage.
-const (
-	StageInfoReceived       = "info_received"
-	StagePickedUp           = "picked_up"
-	StageDeparture          = "departure"
-	StageArrival            = "arrival"
-	StageAvailableForPickup = "available_for_pickup"
-	StageOutForDelivery     = "out_for_delivery"
-	StageDelivered          = "delivered"
-	StageReturning          = "returning"
-	StageReturned           = "returned"
-)
-
-var validStages = map[string]bool{
-	StageInfoReceived: true, StagePickedUp: true, StageDeparture: true,
-	StageArrival: true, StageAvailableForPickup: true, StageOutForDelivery: true,
-	StageDelivered: true, StageReturning: true, StageReturned: true,
-}
-
-// IsValidStage reports whether s is a known milestone stage.
-func IsValidStage(s string) bool { return validStages[s] }
-
 func setStr(dst *string, v string) {
 	if v != "" {
 		*dst = v
 	}
+}
+
+// Milestones maps a Stage* value to the time that stage was reached.
+type Milestones map[string]time.Time
+
+// Subscription status machine (former task_status) — service-owned, not 17TRACK.
+const (
+	SubRegistering = "REGISTERING"
+	SubTracking    = "TRACKING"
+	SubStopped     = "STOPPED"
+	SubCancelled   = "CANCELLED"
+	SubClosed      = "CLOSED"
+	// SubNeedsCarrier: 17TRACK rejected auto-detect (ambiguous / unrecognized carrier).
+	// Package exists locally but was never subscribed — pick a concrete carrier and retry.
+	SubNeedsCarrier = "NEEDS_CARRIER"
+)
+
+// Package sources.
+const (
+	SourceAPI      = "api"
+	SourceShipment = "shipment"
+)
+
+// Return types.
+const (
+	ReturnRTS       = "RTS"
+	ReturnRefused   = "REFUSED"
+	ReturnWarehouse = "RETURN_WAREHOUSE"
+)
+
+// IsDelivered reports whether package status is delivered.
+func (p Package) IsDelivered() bool { return p.Status == StatusDelivered }
+
+// IsActive reports whether 17TRACK is (or is about to be) tracking this generation.
+func (p Package) IsActive() bool {
+	return p.SubscriptionStatus == SubRegistering || p.SubscriptionStatus == SubTracking
+}
+
+// IsFinished reports whether this generation's shipment is over, so a register of the
+// same number may be a carrier recycling it (see Service.Register).
+func (p Package) IsFinished() bool {
+	if p.IsArchived || p.SubscriptionStatus == SubCancelled {
+		return true
+	}
+	return p.IsDelivered() && !p.IsActive()
 }

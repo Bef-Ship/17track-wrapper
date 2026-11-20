@@ -1,18 +1,17 @@
-.PHONY: test build run tidy docker
-
-IMAGE ?= tracking-service:local
+.PHONY: test build run tidy worker
 
 test:
-	go test ./... -count=1
+	go test ./...
 
 build:
-	go build -o bin/tracking-api ./cmd/api
+	mkdir -p bin
+	go build -o bin/tracking ./cmd/tracking
 
 run:
-	go run ./cmd/api
+	go run ./cmd/tracking
+
+worker:
+	TRACKING_ROLE=worker go run ./cmd/tracking
 
 tidy:
 	go mod tidy
-
-docker:
-	docker build -t $(IMAGE) .

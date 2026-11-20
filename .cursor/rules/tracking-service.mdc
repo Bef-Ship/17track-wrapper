@@ -1,0 +1,42 @@
+---
+description: Conventions for parcel-tracking (17TRACK package service)
+alwaysApply: true
+---
+
+# parcel-tracking
+
+Go HTTP service wrapping **17TRACK**: package registration, webhook ingest, lifecycle jobs, hot/cold event snapshots.
+
+Module: `github.com/SolaTyolo/parcel-tracking`
+
+## Schema & migrations
+
+- Schema `tracking.*` is owned by this service (like GoTrue for `auth`).
+- SQL lives flat under `migrations/*.sql` (no `ddl/` subfolder); embedded via `migrations.DDL` and applied on `cmd/tracking` startup into `tracking.schema_migrations`.
+- Unit of tracking: a **package generation**. Carriers recycle numbers, so `tracking_number` is unique only among current generations (`superseded_at IS NULL`); lookups "by number" mean the current generation, history goes by `package_id`. Do **not** reintroduce `tenant_id` on `tracking.package`.
+- API / storage use 17TRACK names and the 17TRACK `carrier` int key; no carrier alias layer.
+- Outbound package updates go only via `ShipmentProjector` (`SHIPMENT_CALLBACK_URL`) — no per-package `tenant_webhook_url`.
+- Prefer mirroring only 17TRACK fields the service actually uses; avoid dump-only misc columns unless product needs them.
+- Archived events live at `tracking-events/<number>/<package_id>.json`; the package row (with `archive_key`) never leaves Postgres.
+
+## HTTP API
+
+- Contract is `api/openapi.yaml` (embedded, served at `/openapi.yaml`); keep it in sync — `TestEveryRouteIsInOpenAPI` fails on undocumented routes.
+- Responses use the 17TRACK envelope `{code, message, data}`; batch endpoints return `{accepted, rejected[].error}` and cap at 40 items (`-18010014`).
+- Return errors as `domain.CodedError` (`domain.Errorf` / `ErrRequired` / `ErrNotRegistered` …) with 17TRACK codes (`-1801xxxx`); wrapper-only conditions use `-2801xxxx`. Pass 17TRACK item rejections through unchanged; request-level 17TRACK failures (our account) map to `-18010003`.
+- Business errors are HTTP 200 like 17TRACK; only 401 / 5xx otherwise. Auth = `TRACKING_SERVICE_TOKENS` via `17token` or Bearer.
+
+## Binary
+
+- `cmd/tracking` — single binary, applies migrations on start; `TRACKING_ROLE=api|worker|all` (worker = cron jobs + asynq consumers calling the service in-process; no `/v1/jobs/*` HTTP).
+
+## Checks before commit / push
+
+When Go or SQL changed, run:
+
+```bash
+go test ./...
+gofmt -l .
+```
+
+Fix failures before committing unless the user explicitly skips checks.

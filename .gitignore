@@ -1,7 +1,5 @@
 bin/
-data/
-*.exe
-.DS_Store
 .env
-.idea/
-.vscode/
+*.exe
+*.test
+.DS_Store

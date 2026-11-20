@@ -1,0 +1,715 @@
+openapi: 3.1.0
+info:
+  title: Tracking Service API
+  version: 1.0.0
+  description: |
+    17TRACK wrapper that persists tracking history. Field names, response envelope and
+    error codes follow 17TRACK v2 (https://api.17track.net/en/doc), so an upstream that
+    already speaks 17TRACK can reuse the same handling.
+
+    ## Envelope
+    Every `/v1` response is `{code, message?, data?}`. `code = 0` means success.
+
+    * Batch calls (register / cancel / change-carrier) return
+      `data: {accepted: [...], rejected: [{number, carrier, error: {code, message}}]}`.
+      A rejected item does not fail the request. Rejections coming from 17TRACK carry
+      17TRACK's own code and message unchanged.
+    * Request-level errors return `code != 0`, `message`, and
+      `data.errors: [{code, message}]`.
+
+    ## HTTP status
+    Like 17TRACK, business errors are **HTTP 200** with `code != 0`. Other statuses
+    are only: `401` for an invalid token (-18010002), `500` for internal errors
+    (-18010003) and `503` when archived events are unavailable (-28019002). Retry only
+    5xx.
+
+    ## Batches (generations)
+    A carrier may reuse a tracking number, so each registration of a number is a
+    separate **package generation** (the batch), identified by `package_id`. Only one
+    unfinished generation per number may exist. Registering it again is rejected with
+    -18019901, as 17TRACK does. A new generation is created when the current one is
+    finished (delivered + no longer tracked, cancelled or archived) and the register
+    comes with a different `external_ref`, the current one is archived, or
+    `new_generation: true` is set.
+
+    Addressing a generation:
+    * `package_id`: exact. It is returned by register and by every callback; storing it is recommended.
+    * `number` + `external_ref`: the generation registered for that order.
+    * `number` alone: the current generation. `GET /v1/packages/history` lists all of them.
+
+    ## Archive
+    Generations inactive for `ARCHIVE_RETENTION_DAYS` (default 100) have their events
+    moved to object storage at `tracking-events/<number>/<package_id>.json`. The package
+    row (and therefore every lookup above) stays queryable. Archived events are returned
+    transparently (`cold: true`), with no restore needed. `POST /v1/packages/restore`
+    moves them back to the hot table. A refresh of an archived generation restores it
+    automatically.
+
+    ## Error codes
+    | code | meaning |
+    |---|---|
+    | 0 | success |
+    | -18010002 | Invalid access security key (missing / wrong service token) |
+    | -18010003 | Internal service error, please try again later |
+    | -18010010 | The data of field {0} is required |
+    | -18010011 | The value of field {0} is invalid |
+    | -18010012 | The format of {0} is invalid (passed through from 17TRACK) |
+    | -18010013 | The submitted data is invalid (malformed JSON / unknown field) |
+    | -18010014 | The submitted tracking number request parameter exceeds 40 limit |
+    | -18019901 | The tracking number has been registered, don't need to repeat registration |
+    | -18019902 | The tracking number does not register (also: unknown package_id / external_ref) |
+    | -18019903 | Carrier cannot be detected; register again with a concrete `carrier` |
+    | -18019906 | Only tracking numbers that are being tracked can be stopped |
+    | other -18019xxx | 17TRACK item rejection, passed through unchanged |
+    | -28019001 | Wrapper only: subscription state does not allow the operation |
+    | -28019002 | Wrapper only: archived events unavailable (cold storage not configured / unreachable) |
+servers:
+  - url: http://tracking-service:8092
+security:
+  - ServiceToken: []
+  - BearerToken: []
+tags:
+  - name: packages
+  - name: query
+  - name: meta
+paths:
+  /v1/packages/register:
+    post:
+      tags: [packages]
+      operationId: register
+      summary: Register tracking numbers (17TRACK /register)
+      description: |
+        At most 40 items. Each item is a 17TRACK register item plus `external_ref` and
+        `new_generation`. An accepted item is `TRACKING`, or `REGISTERING` when the
+        17TRACK call was queued for retry (the result arrives via callback). Items that
+        need a carrier are rejected with -18019903; register them again with `carrier`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+            example:
+              source: shipment
+              items:
+                - number: RR123456789CN
+                  carrier: 3011
+                  external_ref: order-1001
+      responses:
+        '200':
+          $ref: '#/components/responses/Batch'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages/cancel:
+    post:
+      tags: [packages]
+      operationId: cancel
+      summary: Stop tracking current generations (17TRACK /stoptrack)
+      description: Cancelling an already cancelled number is accepted (idempotent).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              additionalProperties: false
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 40
+                  items: { $ref: '#/components/schemas/TrackNumber' }
+      responses:
+        '200':
+          $ref: '#/components/responses/Batch'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages/change-carrier:
+    post:
+      tags: [packages]
+      operationId: changeCarrier
+      summary: Change carrier of current generations (17TRACK /changecarrier)
+      description: |
+        `carrier_old` defaults to the stored carrier. For packages never accepted by
+        17TRACK (`NEEDS_CARRIER` / `CLOSED`) this re-registers with the new carrier.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              additionalProperties: false
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 40
+                  items: { $ref: '#/components/schemas/ChangeCarrierItem' }
+      responses:
+        '200':
+          $ref: '#/components/responses/Batch'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages/refresh:
+    post:
+      tags: [packages]
+      operationId: refresh
+      summary: Pull the latest detail from 17TRACK for the current generation
+      description: Restores the generation first when it is archived.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number]
+              additionalProperties: false
+              properties:
+                number: { type: string }
+      responses:
+        '200':
+          description: Updated package.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PackageResponse' }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages/restore:
+    post:
+      tags: [packages]
+      operationId: restore
+      summary: Move an archived generation's events back to the hot table
+      description: No-op when not archived. Not needed for reads.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [package_id]
+              additionalProperties: false
+              properties:
+                package_id: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Restored package.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PackageResponse' }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages:
+    get:
+      tags: [query]
+      operationId: listPackages
+      summary: List packages (current generations unless include_superseded)
+      parameters:
+        - { name: status, in: query, schema: { type: string }, description: Comma-separated 17TRACK main statuses. }
+        - { name: carrier, in: query, schema: { type: integer } }
+        - { name: external_ref, in: query, schema: { type: string } }
+        - { name: origin_country, in: query, schema: { type: string } }
+        - { name: destination_country, in: query, schema: { type: string } }
+        - { name: subscription_status, in: query, schema: { $ref: '#/components/schemas/SubscriptionStatus' } }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: source, in: query, schema: { type: string, enum: [api, shipment] } }
+        - { name: include_superseded, in: query, schema: { type: boolean, default: false } }
+        - { name: before_id, in: query, schema: { type: integer, format: int64 }, description: Keyset cursor (next_cursor of the previous page). }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Page of packages.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PackagePage' }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages/events:
+    get:
+      tags: [query]
+      operationId: getPackageEvents
+      summary: One generation with its events (hot or archived)
+      parameters:
+        - $ref: '#/components/parameters/PackageID'
+        - $ref: '#/components/parameters/Number'
+        - $ref: '#/components/parameters/ExternalRef'
+      responses:
+        '200':
+          description: Package + events.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PackageEvents' }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages/history:
+    get:
+      tags: [query]
+      operationId: getHistory
+      summary: Every generation of a (possibly recycled) number, newest first
+      parameters:
+        - { name: number, in: query, required: true, schema: { type: string } }
+        - { name: events, in: query, schema: { type: boolean, default: false }, description: Also load each generation's events (archived ones from cold storage). }
+      responses:
+        '200':
+          description: Generations.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          number: { type: string }
+                          generations:
+                            type: array
+                            items: { $ref: '#/components/schemas/PackageEvents' }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/packages/route:
+    get:
+      tags: [query]
+      operationId: getRoute
+      summary: GeoJSON route of one generation from stored event coordinates
+      parameters:
+        - $ref: '#/components/parameters/PackageID'
+        - $ref: '#/components/parameters/Number'
+        - $ref: '#/components/parameters/ExternalRef'
+      responses:
+        '200':
+          description: FeatureCollection with at most one LineString ([lng, lat], oldest first).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/GeoJSONFeatureCollection' }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/carriers:
+    get:
+      tags: [meta]
+      operationId: listCarriers
+      summary: 17TRACK carrier keys
+      responses:
+        '200':
+          description: Carriers.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            key: { type: integer }
+                            name: { type: string }
+                            name_zh_cn: { type: string }
+                            country_iso: { type: string }
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/webhooks/17track:
+    post:
+      tags: [meta]
+      operationId: applyWebhook
+      summary: Gateway fallback for 17TRACK pushes (raw 17TRACK webhook body)
+      description: Unlike other routes, any failure is non-2xx so the gateway retries.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Applied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '400':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+  /healthz:
+    get:
+      tags: [meta]
+      security: []
+      summary: Liveness
+      responses:
+        '200': { description: ok }
+  /readyz:
+    get:
+      tags: [meta]
+      security: []
+      summary: Readiness (database reachable)
+      responses:
+        '200': { description: ok }
+        '503': { description: not ready }
+  /openapi.yaml:
+    get:
+      tags: [meta]
+      security: []
+      summary: This document
+      responses:
+        '200': { description: OpenAPI YAML }
+webhooks:
+  shipmentUpdate:
+    post:
+      summary: Package update callback (POST to SHIPMENT_CALLBACK_URL)
+      description: |
+        Sent only when a generation's events or status / subscription / carrier / return
+        state changed. Delivery is at-least-once and may arrive out of order, so drop
+        payloads whose `occurred_at` is older than the state already applied for that
+        `package_id`. Answer 2xx; any other status is retried.
+      parameters:
+        - name: X-Tracking-Callback-Secret
+          in: header
+          required: false
+          schema: { type: string }
+          description: Equals SHIPMENT_CALLBACK_SECRET when configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CallbackPayload' }
+      responses:
+        '200': { description: Accepted }
+components:
+  securitySchemes:
+    ServiceToken:
+      type: apiKey
+      in: header
+      name: '17token'
+      description: Per-service token from TRACKING_SERVICE_TOKENS (same header as 17TRACK).
+    BearerToken:
+      type: http
+      scheme: bearer
+      description: 'Same token as `Authorization: Bearer <token>`.'
+  parameters:
+    PackageID:
+      name: package_id
+      in: query
+      schema: { type: integer, format: int64 }
+      description: Exact generation; takes precedence over number.
+    Number:
+      name: number
+      in: query
+      schema: { type: string }
+      description: Tracking number; current generation unless external_ref is given.
+    ExternalRef:
+      name: external_ref
+      in: query
+      schema: { type: string }
+      description: With number, the generation registered for this reference (any generation, newest first).
+  responses:
+    Batch:
+      description: 17TRACK batch result.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Envelope'
+              - type: object
+                properties:
+                  data: { $ref: '#/components/schemas/BatchResult' }
+          example:
+            code: 0
+            data:
+              accepted:
+                - { number: RR123456789CN, carrier: 3011, package_id: 42, subscription_status: TRACKING }
+              rejected:
+                - number: LX000000000CN
+                  carrier: 0
+                  package_id: 17
+                  subscription_status: TRACKING
+                  error: { code: -18019901, message: "The tracking number LX000000000CN has been registered, don't need to repeat registration." }
+    Error:
+      description: Request-level error (HTTP 200 for business errors; 401 / 5xx otherwise).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            code: -18010014
+            message: The submitted tracking number request parameter exceeds 40 limit.
+            data:
+              errors:
+                - { code: -18010014, message: The submitted tracking number request parameter exceeds 40 limit. }
+  schemas:
+    Envelope:
+      type: object
+      required: [code]
+      properties:
+        code: { type: integer, description: 0 = success. }
+        message: { type: string }
+        data: {}
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer }
+        message: { type: string }
+    ErrorResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code: { type: integer }
+        message: { type: string }
+        data:
+          type: object
+          properties:
+            errors:
+              type: array
+              items: { $ref: '#/components/schemas/ErrorBody' }
+    ItemResult:
+      type: object
+      required: [number, carrier]
+      properties:
+        number: { type: string }
+        carrier: { type: integer, description: 17TRACK carrier key (0 = auto-detect). }
+        package_id: { type: integer, format: int64, description: Generation the item resolved to (also set on most rejections). }
+        subscription_status: { $ref: '#/components/schemas/SubscriptionStatus' }
+        error: { $ref: '#/components/schemas/ErrorBody' }
+    BatchResult:
+      type: object
+      required: [accepted, rejected]
+      properties:
+        accepted:
+          type: array
+          items: { $ref: '#/components/schemas/ItemResult' }
+        rejected:
+          type: array
+          items: { $ref: '#/components/schemas/ItemResult' }
+    TrackNumber:
+      type: object
+      required: [number]
+      properties:
+        number: { type: string }
+        carrier: { type: integer }
+    SpecialTrackingInfo:
+      type: object
+      properties:
+        number_type: { type: string }
+        parameter: { type: string }
+    RegisterItem:
+      type: object
+      description: 17TRACK /register item.
+      required: [number]
+      properties:
+        number: { type: string }
+        carrier: { type: integer, description: 17TRACK carrier key; 0 / omitted = auto-detect. }
+        final_carrier: { type: integer }
+        auto_detection: { type: boolean }
+        lang: { type: string }
+        translation_mode: { type: string, enum: [Denied, UseDefaultLang, UseThirdPartyServices] }
+        email: { type: string }
+        order_no: { type: string }
+        order_time: { type: string }
+        origin_country: { type: string }
+        ship_date: { type: string }
+        destination_postal_code: { type: string }
+        destination_country: { type: string }
+        destination_city: { type: string }
+        shipper: { type: string }
+        consignee: { type: string }
+        phone_number_last_4: { type: string }
+        phone_number: { type: string }
+        cpf_or_cnpj: { type: string }
+        special_tracking_info: { $ref: '#/components/schemas/SpecialTrackingInfo' }
+        tag: { type: string }
+        remark: { type: string }
+    RegisterItemInput:
+      allOf:
+        - $ref: '#/components/schemas/RegisterItem'
+        - type: object
+          properties:
+            external_ref:
+              type: string
+              description: Upstream reference (order / shipment id); selects or starts a generation.
+            new_generation:
+              type: boolean
+              description: Start a new generation even if the current one is not finished (number recycled early).
+    RegisterRequest:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        source: { type: string, enum: [api, shipment], default: api }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 40
+          items: { $ref: '#/components/schemas/RegisterItemInput' }
+    ChangeCarrierItem:
+      type: object
+      required: [number, carrier_new]
+      properties:
+        number: { type: string }
+        carrier_old: { type: integer }
+        carrier_new: { type: integer }
+        final_carrier_old: { type: integer }
+        final_carrier_new: { type: integer }
+    SubscriptionStatus:
+      type: string
+      enum: [REGISTERING, TRACKING, STOPPED, CANCELLED, CLOSED, NEEDS_CARRIER]
+      description: |
+        REGISTERING: 17TRACK call pending/queued. TRACKING: subscribed. STOPPED: 17TRACK
+        stopped tracking. CANCELLED: cancelled by caller. CLOSED: rejected by 17TRACK.
+        NEEDS_CARRIER: auto-detect failed, register again with a carrier.
+    Address:
+      type: object
+      properties:
+        country: { type: string }
+        state: { type: string }
+        city: { type: string }
+        postal_code: { type: string }
+    Package:
+      type: object
+      description: One generation of a tracking number.
+      properties:
+        package_id: { type: integer, format: int64 }
+        tracking_number: { type: string }
+        carrier: { type: integer }
+        external_ref: { type: string }
+        weight: { type: number }
+        status:
+          type: string
+          description: 17TRACK main status (NotFound, InfoReceived, InTransit, Expired, AvailableForPickup, OutForDelivery, DeliveryFailure, Delivered, Exception) or `registered` before first data.
+        sub_status: { type: string }
+        sub_status_desc: { type: string }
+        origin: { $ref: '#/components/schemas/Address' }
+        destination: { $ref: '#/components/schemas/Address' }
+        service_type: { type: string }
+        pieces: { type: integer }
+        reference_number: { type: string }
+        last_mile_tracking_number: { type: string }
+        last_mile_carrier_code: { type: string }
+        estimated_delivery_from: { type: string, format: date-time }
+        estimated_delivery_to: { type: string, format: date-time }
+        milestones:
+          type: object
+          additionalProperties: { type: string, format: date-time }
+          description: Stage (InfoReceived, PickedUp, Departure, Arrival, AvailableForPickup, OutForDelivery, Delivered, Returning, Returned) → time reached.
+        picked_up_at: { type: string, format: date-time }
+        delivered_at: { type: string, format: date-time }
+        latest_event_time: { type: string, format: date-time }
+        latest_event_desc: { type: string }
+        latest_event_location: { type: string }
+        is_archived: { type: boolean }
+        archive_key: { type: string, description: 'tracking-events/<number>/<package_id>.json when archived.' }
+        latest_update_at: { type: string, format: date-time }
+        tag: { type: string }
+        subscription_status: { $ref: '#/components/schemas/SubscriptionStatus' }
+        source: { type: string, enum: [api, shipment] }
+        is_retracked: { type: boolean }
+        cancelled_at: { type: string, format: date-time }
+        register_params: { $ref: '#/components/schemas/RegisterItem' }
+        superseded_at: { type: string, format: date-time, description: Set once a newer generation of the number exists. }
+        has_return: { type: boolean }
+        return_type: { type: string, enum: [RTS, REFUSED, RETURN_WAREHOUSE] }
+        return_detect_supported: { type: boolean }
+        return_detected_at: { type: string, format: date-time }
+        return_carrier_event_id: { type: string }
+        last_callback_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PackageResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Package' }
+    PackagePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Package' }
+        next_cursor: { type: integer, format: int64 }
+        limit: { type: integer }
+        offset: { type: integer }
+    TrackingEvent:
+      type: object
+      properties:
+        event_id: { type: integer, format: int64 }
+        package_id: { type: integer, format: int64 }
+        tracking_number: { type: string }
+        event_time: { type: string, format: date-time }
+        stage: { type: string }
+        sub_status: { type: string }
+        description: { type: string }
+        location: { type: string }
+        address: { $ref: '#/components/schemas/Address' }
+        lat: { type: number }
+        lng: { type: number }
+        event_fingerprint: { type: string }
+        created_at: { type: string, format: date-time }
+    PackageEvents:
+      type: object
+      properties:
+        package: { $ref: '#/components/schemas/Package' }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/TrackingEvent' }
+        cold: { type: boolean, description: Events were read from the archive. }
+    GeoJSONFeatureCollection:
+      type: object
+      properties:
+        type: { type: string, const: FeatureCollection }
+        features:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string, const: Feature }
+              geometry:
+                type: object
+                properties:
+                  type: { type: string, const: LineString }
+                  coordinates:
+                    type: array
+                    items:
+                      type: array
+                      items: { type: number }
+              properties:
+                type: object
+                properties:
+                  number: { type: string }
+                  carrier: { type: integer }
+                  package_id: { type: integer, format: int64 }
+    CallbackPayload:
+      type: object
+      properties:
+        package_id: { type: integer, format: int64, description: Generation (batch) id. }
+        tracking_number: { type: string }
+        carrier: { type: integer }
+        subscription_status: { $ref: '#/components/schemas/SubscriptionStatus' }
+        status: { type: string }
+        sub_status: { type: string }
+        source: { type: string }
+        external_ref: { type: string }
+        active: { type: boolean, description: 17TRACK is (or is about to be) tracking this generation. }
+        pushed: { type: boolean, description: Change came from a 17TRACK push (vs poll / API). }
+        package: { $ref: '#/components/schemas/Package' }
+        new_events:
+          type: array
+          items: { $ref: '#/components/schemas/TrackingEvent' }
+        parsed: { type: object, additionalProperties: true, description: Raw normalized 17TRACK detail (legacy receivers). }
+        occurred_at: { type: string, format: date-time }

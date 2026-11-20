@@ -1,26 +1,31 @@
-ARG GOLANG_IMAGE=ccr.ccs.tencentyun.com/solat/golang:1.25-alpine
-ARG ALPINE_IMAGE=ccr.ccs.tencentyun.com/solat/alpine:3.20
-
-FROM --platform=$BUILDPLATFORM ${GOLANG_IMAGE} AS build
-ARG TARGETOS=linux
-ARG TARGETARCH
-
+# syntax=docker/dockerfile:1
+FROM ccr.ccs.tencentyun.com/solat/golang:1.26-alpine AS build
 WORKDIR /src
+
+# Mainland networks often time out on proxy.golang.org; allow override at build time.
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GOSUMDB=sum.golang.google.cn
+ENV GOPROXY=${GOPROXY} GOSUMDB=${GOSUMDB}
+
+RUN apk add --no-cache git ca-certificates
+
 COPY go.mod go.sum ./
 RUN go mod download
+
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/tracking-api ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/tracking ./cmd/tracking
 
-FROM ${ALPINE_IMAGE}
+FROM ccr.ccs.tencentyun.com/solat/alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata wget
+RUN apk add --no-cache ca-certificates wget \
+ && adduser -D -H -u 10001 appuser
+
 WORKDIR /app
-COPY --from=build /out/tracking-api /app/tracking-api
+COPY --from=build /out/tracking /app/tracking
+# One binary; invoked as tracking-worker it defaults to TRACKING_ROLE=worker.
+RUN ln -s tracking /app/tracking-worker && chown -R appuser:appuser /app
 
 ENV HTTP_ADDR=:8092
 EXPOSE 8092
-USER nobody
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8092/health >/dev/null || exit 1
-CMD ["/app/tracking-api"]
+USER appuser
+CMD ["/app/tracking"]

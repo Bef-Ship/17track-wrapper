@@ -1,0 +1,54 @@
+# Build a static Redoc site from api/openapi.yaml and publish to GitHub Pages.
+# One-time: Repo Settings → Pages → Source: GitHub Actions.
+# Site URL: https://<owner>.github.io/<repo>/
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - api/openapi.yaml
+      - docs/index.html
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build OpenAPI site
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Assemble site
+        run: |
+          mkdir -p site
+          cp docs/index.html site/index.html
+          cp api/openapi.yaml site/openapi.yaml
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: Deploy GitHub Pages
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
