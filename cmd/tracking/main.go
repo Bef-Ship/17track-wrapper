@@ -221,4 +221,3 @@ func openRedis(redisURL string) redis.UniversalClient {
 	}
 	return rdb
 }
-
