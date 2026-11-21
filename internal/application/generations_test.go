@@ -10,6 +10,7 @@ import (
 	sdk "github.com/SolaTyolo/17track-sdk"
 
 	"github.com/SolaTyolo/17track-wrapper/internal/domain"
+	"github.com/SolaTyolo/17track-wrapper/pkg/track17"
 )
 
 type memCold struct {
@@ -232,5 +233,30 @@ func TestWebhookNotifiesOnlyOnChange(t *testing.T) {
 	push(t, svc, "TN-N", "n3", ev1, [3]string{"2026-01-02T00:00:00Z", "", ""})
 	if len(obs.updates) != 2 || len(obs.updates[1].NewEvents) != 1 {
 		t.Fatalf("new event push = %+v", obs.updates)
+	}
+}
+
+func TestRegisterNopCarrierSeedsWebhookEvents(t *testing.T) {
+	t.Setenv("ENABLE_MOCK", "true")
+	svc, repo, _, obs := newTestService(t)
+	res, err := svc.Register(context.Background(), domain.RegisterInput{
+		Items: []domain.RegisterItemInput{{
+			RegisterItem: sdk.RegisterItem{Number: "1ZNOPSEED", Carrier: track17.NopCarrierKey, Lang: "en"},
+		}},
+	})
+	got := only(t, res, err)
+	if got.Error != nil || got.SubscriptionStatus != domain.SubTracking {
+		t.Fatalf("register = %+v", got)
+	}
+	evs := repo.events[got.PackageID]
+	if len(evs) == 0 {
+		t.Fatal("expected nop webhook to insert events")
+	}
+	pkg := repo.pkgs[got.PackageID]
+	if pkg.Status != domain.StatusInTransit || pkg.LatestEventDesc == "" {
+		t.Fatalf("package not updated from nop webhook: %+v", pkg)
+	}
+	if len(obs.updates) == 0 {
+		t.Fatal("expected shipment observer notify from nop webhook seed")
 	}
 }

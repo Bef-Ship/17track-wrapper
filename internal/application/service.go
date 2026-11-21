@@ -62,7 +62,7 @@ func NewService(
 	}
 	syncStale := opts.SyncStaleAfter
 	if syncStale <= 0 {
-		syncStale = 12 * time.Hour
+		syncStale = 48 * time.Hour
 	}
 	return &Service{
 		repo:           repo,
@@ -83,12 +83,12 @@ func (s *Service) WithRegisterQueue(q domain.RegisterJobPublisher) *Service {
 	return s
 }
 
-// client returns the platform 17TRACK client (TRACK17_SECRET / nop).
+// client returns the platform 17TRACK client (TRACK17_SECRET; Selective when ENABLE_MOCK).
 func (s *Service) client() (track17.Client, error) {
 	if s.sdk == nil {
 		return nil, domain.ErrNotConfigured
 	}
-	// Nop uses a non-empty sentinel token; real clients need a token too.
+	// Empty token is OK only for ENABLE_MOCK nop-carrier local (Selective.Token is non-empty).
 	if strings.TrimSpace(s.sdk.Token()) == "" {
 		return nil, domain.ErrNotConfigured
 	}

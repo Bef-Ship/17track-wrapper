@@ -15,20 +15,34 @@ import (
 )
 
 const (
-	taskType    = "tracking.event"
-	idempTTL    = 24 * time.Hour
-	idempPrefix = "tracking:event:id:"
-	maxRetry    = 8
+	defaultTaskType = "tracking.event"
+	idempTTL        = 24 * time.Hour
+	idempPrefix     = "tracking:event:id:"
+	maxRetry        = 8
 )
+
+// Option configures a Provider.
+type Option func(*Provider)
+
+// WithTaskType sets the Asynq task type for publish and subscribe.
+// Empty values are ignored (keeps defaultTaskType / prior option).
+func WithTaskType(taskType string) Option {
+	return func(p *Provider) {
+		if t := strings.TrimSpace(taskType); t != "" {
+			p.taskType = t
+		}
+	}
+}
 
 // Provider is the V1 EventProvider: Asynq over Redis (persist, ACK, retry, archive/DLQ, idempotent eventId).
 type Provider struct {
-	opt    asynq.RedisConnOpt
-	client *asynq.Client
-	rdb    redis.UniversalClient
+	opt      asynq.RedisConnOpt
+	client   *asynq.Client
+	rdb      redis.UniversalClient
+	taskType string
 }
 
-func New(redisURL string) (*Provider, error) {
+func New(redisURL string, opts ...Option) (*Provider, error) {
 	if strings.TrimSpace(redisURL) == "" {
 		return nil, fmt.Errorf("asynq provider: REDIS_URL is required")
 	}
@@ -41,11 +55,16 @@ func New(redisURL string) (*Provider, error) {
 	if !ok {
 		return nil, fmt.Errorf("asynq provider: unexpected redis client %T", raw)
 	}
-	return &Provider{
-		opt:    opt,
-		client: asynq.NewClient(opt),
-		rdb:    rdb,
-	}, nil
+	p := &Provider{
+		opt:      opt,
+		client:   asynq.NewClient(opt),
+		rdb:      rdb,
+		taskType: defaultTaskType,
+	}
+	for _, o := range opts {
+		o(p)
+	}
+	return p, nil
 }
 
 func (p *Provider) Publish(ctx context.Context, channel string, scope event.Scope, rawEvent any) error {
@@ -69,7 +88,7 @@ func (p *Provider) Publish(ctx context.Context, channel string, scope event.Scop
 	if err != nil {
 		return err
 	}
-	task := asynq.NewTask(taskType, payload, asynq.MaxRetry(maxRetry))
+	task := asynq.NewTask(p.taskType, payload, asynq.MaxRetry(maxRetry))
 	_, err = p.client.EnqueueContext(ctx, task,
 		asynq.Queue(QueueName(channel)),
 		asynq.TaskID(env.EventID),
@@ -98,7 +117,7 @@ func (p *Provider) Subscribe(ctx context.Context, channel string, handler event.
 		Queues:      map[string]int{q: 10},
 	})
 	mux := asynq.NewServeMux()
-	mux.HandleFunc(taskType, func(ctx context.Context, t *asynq.Task) error {
+	mux.HandleFunc(p.taskType, func(ctx context.Context, t *asynq.Task) error {
 		var env event.Envelope
 		if err := json.Unmarshal(t.Payload(), &env); err != nil {
 			return fmt.Errorf("decode envelope: %v: %w", err, asynq.SkipRetry)

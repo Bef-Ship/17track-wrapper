@@ -10,6 +10,8 @@ import (
 	sdk "github.com/SolaTyolo/17track-sdk"
 
 	"github.com/SolaTyolo/17track-wrapper/internal/domain"
+	"github.com/SolaTyolo/17track-wrapper/pkg/config"
+	blog "github.com/SolaTyolo/17track-wrapper/pkg/log"
 	"github.com/SolaTyolo/17track-wrapper/pkg/track17"
 )
 
@@ -64,6 +66,10 @@ func (s *Service) prepareRegister(ctx context.Context, source string, item domai
 		return nil, out
 	}
 	if params.Carrier < 0 {
+		out.Reject(domain.ErrInvalidValue("carrier"))
+		return nil, out
+	}
+	if track17.IsNopCarrier(params.Carrier) && !config.EnableMock() {
 		out.Reject(domain.ErrInvalidValue("carrier"))
 		return nil, out
 	}
@@ -330,6 +336,23 @@ func (s *Service) registerChunk(ctx context.Context, client track17.Client, chun
 			continue
 		}
 		p.out.SubscriptionStatus, p.out.Carrier = p.pkg.SubscriptionStatus, p.pkg.Carrier
+		// NOP carrier: seed the same TRACKING_UPDATED path as a real 17TRACK webhook
+		// so events land and shipment callbacks fire without an upstream push.
+		if track17.IsNopCarrier(p.pkg.Carrier) {
+			s.seedNopWebhook(ctx, p.pkg.TrackingNumber, p.pkg.Carrier)
+		}
+	}
+}
+
+// seedNopWebhook applies a synthetic 17TRACK TRACKING_UPDATED body (in-process).
+func (s *Service) seedNopWebhook(ctx context.Context, number string, carrier int) {
+	raw, err := track17.NopWebhookBody(number, carrier)
+	if err != nil {
+		blog.Svc("tracking").Warn("nop webhook body", "number", number, "err", err.Error())
+		return
+	}
+	if err := s.ApplyWebhookBody(ctx, raw); err != nil {
+		blog.Svc("tracking").Warn("nop webhook seed failed", "number", number, "err", err.Error())
 	}
 }
 
@@ -488,6 +511,10 @@ func (s *Service) changeCarrierOne(ctx context.Context, item domain.ChangeCarrie
 		return out
 	}
 	if item.CarrierNew <= 0 {
+		out.Reject(domain.ErrInvalidValue("carrier_new"))
+		return out
+	}
+	if track17.IsNopCarrier(item.CarrierNew) && !config.EnableMock() {
 		out.Reject(domain.ErrInvalidValue("carrier_new"))
 		return out
 	}

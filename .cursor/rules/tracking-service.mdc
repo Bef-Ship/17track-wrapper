@@ -17,7 +17,7 @@ Module: `github.com/SolaTyolo/parcel-tracking`
 - API / storage use 17TRACK names and the 17TRACK `carrier` int key; no carrier alias layer.
 - Outbound package updates go only via `ShipmentProjector` (`SHIPMENT_CALLBACK_URL`) — no per-package `tenant_webhook_url`.
 - Prefer mirroring only 17TRACK fields the service actually uses; avoid dump-only misc columns unless product needs them.
-- Archived events live at `tracking-events/<number>/<package_id>.json`; the package row (with `archive_key`) never leaves Postgres.
+- Archived events live at `tracking-events/<number>/<package_id>.json` on S3-compatible storage (`S3_ENDPOINT` + keys; no obj-gateway); the package row (with `archive_key`) never leaves Postgres.
 
 ## HTTP API
 

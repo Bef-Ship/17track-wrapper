@@ -31,7 +31,7 @@ import (
 	"github.com/SolaTyolo/17track-wrapper/pkg/event"
 	"github.com/SolaTyolo/17track-wrapper/pkg/event/asynqprovider"
 	blog "github.com/SolaTyolo/17track-wrapper/pkg/log"
-	"github.com/SolaTyolo/17track-wrapper/pkg/objstore"
+	"github.com/SolaTyolo/17track-wrapper/pkg/s3store"
 	"github.com/SolaTyolo/17track-wrapper/pkg/track17"
 )
 
@@ -64,7 +64,7 @@ func main() {
 	// No in-memory fallback: only the worker role consumes the bus, so without Redis
 	// register retries and callbacks run inline instead of being queued for nobody.
 	var bus event.Provider
-	if b, err := asynqprovider.New(config.RedisURL()); err != nil {
+	if b, err := asynqprovider.New(config.RedisURL(), asynqprovider.WithTaskType(config.EventTaskType())); err != nil {
 		if config.IsProduction() {
 			blog.Fatalf("event bus: %v", err)
 		}
@@ -72,6 +72,7 @@ func main() {
 	} else {
 		bus = b
 		defer func() { _ = b.Close() }()
+		wlog.Info("event bus ready", "task_type", config.EventTaskType())
 	}
 
 	track17Client := track17.WithSharedLimit(track17.NewClientForAppEnv(), rdb, "track17:ratelimit")
@@ -82,7 +83,22 @@ func main() {
 		archiveBucket = config.S3DiskBucket()
 	}
 	if strings.EqualFold(config.Env("ARCHIVE_ENABLED", "false"), "true") && archiveBucket != "" {
-		cold = infrastructure.NewObjArchive(newObj(archiveBucket, config.Env("S3_CDN_BASE_URL", "")))
+		s3c, err := s3store.New(s3store.Config{
+			Endpoint:       config.S3Endpoint(),
+			Region:         config.S3Region(),
+			AccessKey:      config.S3AccessKey(),
+			SecretKey:      config.S3SecretKey(),
+			Bucket:         archiveBucket,
+			ForcePathStyle: config.S3ForcePathStyle(),
+		})
+		if err != nil {
+			blog.Fatalf("s3 archive (%s): %v", archiveBucket, err)
+		}
+		if !s3c.Configured() {
+			blog.Fatalf("s3 archive (%s): set S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY", archiveBucket)
+		}
+		cold = infrastructure.NewS3Archive(s3c)
+		wlog.Info("archive store ready", "backend", "s3", "bucket", archiveBucket, "endpoint", config.S3Endpoint())
 	}
 
 	retentionDays, err := config.EnvInt("ARCHIVE_RETENTION_DAYS", application.DefaultArchiveRetentionDays)
@@ -93,7 +109,7 @@ func main() {
 	if err != nil {
 		blog.Fatalf("ARCHIVE_BATCH_SIZE: %v", err)
 	}
-	syncStaleHours, err := config.EnvInt("SYNC_STALE_HOURS", 12)
+	syncStaleHours, err := config.EnvInt("SYNC_STALE_HOURS", 48)
 	if err != nil {
 		blog.Fatalf("SYNC_STALE_HOURS: %v", err)
 	}
@@ -137,11 +153,6 @@ func main() {
 		tokens, err := httpapi.ParseServiceTokens(config.Env("TRACKING_SERVICE_TOKENS", ""))
 		if err != nil {
 			blog.Fatalf("TRACKING_SERVICE_TOKENS: %v", err)
-		}
-		if legacy := config.Env("TRACKING_API_TOKEN", ""); legacy != "" {
-			if _, dup := tokens["default"]; !dup {
-				tokens["default"] = legacy
-			}
 		}
 		if len(tokens) == 0 {
 			if config.IsProduction() {
@@ -211,25 +222,3 @@ func openRedis(redisURL string) redis.UniversalClient {
 	return rdb
 }
 
-func newObj(bucket, cdn string) *objstore.Client {
-	endpoint := config.Env("OBJ_GATEWAY_URL", "")
-	public := config.Env("OBJ_GATEWAY_PUBLIC_URL", "")
-	secret := config.Env("OBJ_GATEWAY_JWT_SECRET", "")
-	if secret == "" {
-		secret = config.Env("GOTRUE_JWT_SECRET", "")
-	}
-	cdn = strings.TrimRight(strings.TrimSpace(cdn), "/")
-	c, err := objstore.New(objstore.Config{
-		Endpoint:       endpoint,
-		PublicEndpoint: public,
-		JWTSecret:      secret,
-		ServiceToken:   config.Env("OBJ_GATEWAY_TOKEN", ""),
-		Bucket:         bucket,
-		PublicBase:     cdn,
-		CDNBase:        cdn,
-	})
-	if err != nil {
-		blog.Fatalf("obj-gateway (%s): %v", bucket, err)
-	}
-	return c
-}

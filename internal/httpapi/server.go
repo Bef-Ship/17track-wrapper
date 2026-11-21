@@ -14,6 +14,7 @@ import (
 	"github.com/SolaTyolo/17track-wrapper/api"
 	"github.com/SolaTyolo/17track-wrapper/internal/application"
 	"github.com/SolaTyolo/17track-wrapper/internal/domain"
+	"github.com/SolaTyolo/17track-wrapper/pkg/config"
 	blog "github.com/SolaTyolo/17track-wrapper/pkg/log"
 	"github.com/SolaTyolo/17track-wrapper/pkg/track17"
 )
@@ -234,7 +235,7 @@ type carrierItem struct {
 }
 
 func (s *Server) listCarriers(w http.ResponseWriter, _ *http.Request) {
-	list, err := track17.ListCarriers()
+	list, err := track17.ListCarriersWithMock(config.EnableMock())
 	if err != nil {
 		fail(w, err)
 		return

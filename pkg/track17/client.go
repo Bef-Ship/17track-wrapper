@@ -9,7 +9,7 @@ import (
 )
 
 // Client is the 17TRACK surface used by tracking (register / stop / retrack / change / delete / info).
-// *sdk.Client and *Nop satisfy this interface.
+// *sdk.Client, *Nop and *Selective satisfy this interface.
 type Client interface {
 	Token() string
 	Register(ctx context.Context, items []sdk.RegisterItem) (*sdk.AcceptedRejected[sdk.RegisterAccepted], error)
@@ -20,24 +20,20 @@ type Client interface {
 	GetTrackInfo(ctx context.Context, items []sdk.TrackNumber) (*sdk.AcceptedRejected[sdk.TrackDetail], error)
 }
 
-// NewClientFromToken picks Nop when token is the sentinel, otherwise a real SDK client.
-// Empty token returns Nop only outside production (local DX); production empty → real
-// client with empty token so calls fail loudly via ErrEmptyToken / ErrNotConfigured.
+// NewClientFromToken builds a real SDK client. Empty token is allowed (calls fail at request time);
+// mock packages use ENABLE_MOCK + NopCarrierKey via NewSelective — not a sentinel TRACK17_SECRET.
 func NewClientFromToken(token string) Client {
-	token = strings.TrimSpace(token)
-	if token == NopToken() {
-		return NewNop()
-	}
-	if token == "" && !config.IsProduction() {
-		return NewNop()
-	}
-	return sdk.New(token, ClientOptionsFromEnv()...)
+	return sdk.New(strings.TrimSpace(token), ClientOptionsFromEnv()...)
 }
 
-// NewClientFromEnv builds a client from TRACK17_SECRET (platform account only).
-// TRACK17_SECRET=nop-track17-token → Nop; otherwise real SDK (rate-limited).
+// NewClientFromEnv builds the platform 17TRACK client from TRACK17_SECRET.
+// When ENABLE_MOCK=true, wraps with Selective so NopCarrierKey never hits the real API.
 func NewClientFromEnv() Client {
-	return WithRateLimit(NewClientFromToken(TokenFromEnv()), DefaultQPS)
+	real := WithRateLimit(NewClientFromToken(TokenFromEnv()), DefaultQPS)
+	if config.EnableMock() {
+		return NewSelective(real, NewNop())
+	}
+	return real
 }
 
 // NewClientForAppEnv is an alias of NewClientFromEnv (env-only platform token).

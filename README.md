@@ -34,11 +34,11 @@ Contract: [`api/openapi.yaml`](api/openapi.yaml), also served at `GET /openapi.y
 | `GET` | `/v1/packages/events` | One generation + events: `?package_id=`, `?number=&external_ref=` or `?number=` (current); archived ones are read from cold storage |
 | `GET` | `/v1/packages/history` | Every generation of a number, newest first (`&events=true` to include events) |
 | `GET` | `/v1/packages/route` | GeoJSON route from stored event coordinates (same lookup as events) |
-| `GET` | `/v1/carriers` | 17TRACK carrier keys |
+| `GET` | `/v1/carriers` | 17TRACK carrier keys (`ENABLE_MOCK=true` appends NOP key `900001`; register with that key seeds a TRACKING_UPDATED webhook with fake events) |
 | `POST` | `/v1/webhooks/17track` | 17TRACK push (sync fallback; normally via the event bus). Non-2xx on failure so the gateway retries |
 | `GET` | `/healthz`, `/readyz`, `/openapi.yaml` | Liveness / readiness (DB ping) / contract (no auth) |
 
-**Service auth:** `TRACKING_SERVICE_TOKENS=backend:<tok>,gateway:<tok>` gives each calling service its own token. Send it as the `17token` header (as with 17TRACK) or as `Authorization: Bearer <tok>`. Without a valid token the response is HTTP 401 with `code: -18010002`. The legacy `TRACKING_API_TOKEN` still works as the token named `default`. In production the API refuses to start without any token.
+**Service auth:** `TRACKING_SERVICE_TOKENS=backend:<tok>,gateway:<tok>` gives each calling service its own token. Send it as the `17token` header (as with 17TRACK) or as `Authorization: Bearer <tok>`. Without a valid token the response is HTTP 401 with `code: -18010002`. In production the API refuses to start without any token.
 
 ## Recycled tracking numbers
 
@@ -46,7 +46,7 @@ Carriers reuse numbers, so each `tracking.package` row is one **generation** of 
 
 ## Archive
 
-With `ARCHIVE_ENABLED=true`, the worker moves the events of inactive packages (not `REGISTERING` / `TRACKING`) untouched for `ARCHIVE_RETENTION_DAYS` (default 100) to obj-gateway at `tracking-events/<number>/<package_id>.json` and deletes the hot event rows. The package row itself (with `archive_key`) stays in Postgres, so every lookup above still resolves the generation. Archived events stay readable without restoring; `POST /v1/packages/restore` (or a refresh) brings them back and restarts the retention clock.
+With `ARCHIVE_ENABLED=true`, the worker moves the events of inactive packages (not `REGISTERING` / `TRACKING`) untouched for `ARCHIVE_RETENTION_DAYS` (default 100) to S3-compatible storage (`S3_ENDPOINT` + keys) at `tracking-events/<number>/<package_id>.json` and deletes the hot event rows. The package row itself (with `archive_key`) stays in Postgres, so every lookup above still resolves the generation. Archived events stay readable without restoring; `POST /v1/packages/restore` (or a refresh) brings them back and restarts the retention clock.
 
 ## Shipment callback
 

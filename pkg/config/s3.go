@@ -5,6 +5,25 @@ import "strings"
 // Default Tencent COS APPID suffix used in bucket names when S3_APPID / COS_APPID unset.
 const defaultS3AppID = "1490074736"
 
+// S3Endpoint is the S3-compatible API base (RustFS / COS), e.g. http://rustfs:9000.
+func S3Endpoint() string {
+	return strings.TrimRight(strings.TrimSpace(Env("S3_ENDPOINT", "")), "/")
+}
+
+// S3AccessKey / S3SecretKey are static credentials for direct S3 I/O.
+func S3AccessKey() string { return Env("S3_ACCESS_KEY", "") }
+func S3SecretKey() string { return Env("S3_SECRET_KEY", "") }
+
+// S3Region defaults to us-east-1 (RustFS-friendly).
+func S3Region() string {
+	return Env("S3_REGION", "us-east-1")
+}
+
+// S3ForcePathStyle defaults true (RustFS / MinIO). Set false for virtual-host COS.
+func S3ForcePathStyle() bool {
+	return EnvBool("S3_FORCE_PATH_STYLE", true)
+}
+
 // S3AppID returns the COS APPID used as bucket-name suffix.
 func S3AppID() string {
 	return Env("S3_APPID", Env("COS_APPID", defaultS3AppID))

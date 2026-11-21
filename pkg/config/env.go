@@ -14,6 +14,23 @@ func Env(key, fallback string) string {
 	return fallback
 }
 
+// EnvBool parses a boolean env var; unset or empty returns fallback.
+// True values: 1, true, t, yes, y, on (case-insensitive).
+func EnvBool(key string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
 // AppEnv returns the normalized APP_ENV (production|develop|local|…).
 func AppEnv() string {
 	return normalizeAppEnv(Env("APP_ENV", "local"))
@@ -22,6 +39,18 @@ func AppEnv() string {
 // IsProduction reports whether APP_ENV is production (or prod).
 func IsProduction() bool {
 	return AppEnv() == "production"
+}
+
+// EnableMock reports whether ENABLE_MOCK is set (append nop carrier, local mock UX).
+func EnableMock() bool {
+	return EnvBool("ENABLE_MOCK", false)
+}
+
+// EventTaskType is the Asynq task type used for the shared event bus
+// (publish + subscribe). Must match gateway's EVENT_TASK_TYPE when consuming
+// external.17track pushes (gateway default is befship.event).
+func EventTaskType() string {
+	return Env("EVENT_TASK_TYPE", "tracking.event")
 }
 
 // EnvInt parses an integer env var; unset or empty returns fallback.

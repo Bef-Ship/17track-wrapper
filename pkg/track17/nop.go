@@ -2,30 +2,31 @@ package track17
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	sdk "github.com/SolaTyolo/17track-sdk"
 )
 
-const nopToken = "nop-track17-token"
-
-// NopToken is the sentinel token used by NewNop (non-production).
-func NopToken() string { return nopToken }
-
-// Nop is a no-op 17TRACK client that returns fake Accepted payloads.
+// Nop is a local mock 17TRACK client used for NopCarrierKey when ENABLE_MOCK=true.
+// It never calls the real API; Register is accepted and GetTrackInfo returns fake events.
 type Nop struct{}
 
-// NewNop returns a Client suitable for non-production environments.
+// NewNop returns a Client for the mock NOP carrier path.
 func NewNop() *Nop { return &Nop{} }
 
-func (n *Nop) Token() string { return nopToken }
+func (n *Nop) Token() string { return "nop-carrier" }
 
 func (n *Nop) Register(_ context.Context, items []sdk.RegisterItem) (*sdk.AcceptedRejected[sdk.RegisterAccepted], error) {
 	out := &sdk.AcceptedRejected[sdk.RegisterAccepted]{}
 	for _, it := range items {
+		carrier := it.Carrier
+		if carrier <= 0 {
+			carrier = NopCarrierKey
+		}
 		out.Accepted = append(out.Accepted, sdk.RegisterAccepted{
 			Number:  it.Number,
-			Carrier: it.Carrier,
+			Carrier: carrier,
 			Lang:    it.Lang,
 		})
 	}
@@ -58,7 +59,11 @@ func (n *Nop) GetTrackInfo(_ context.Context, items []sdk.TrackNumber) (*sdk.Acc
 	pickup := now.Add(-48 * time.Hour)
 	transit := now.Add(-24 * time.Hour)
 	for _, it := range items {
-		out.Accepted = append(out.Accepted, fakeDetail(it, pickup, transit, now))
+		carrier := it.Carrier
+		if carrier <= 0 {
+			carrier = NopCarrierKey
+		}
+		out.Accepted = append(out.Accepted, FakeDetail(it.Number, carrier, pickup, transit, now))
 	}
 	return out, nil
 }
@@ -71,7 +76,11 @@ func simpleAccepted(items []sdk.TrackNumber) *sdk.AcceptedRejected[sdk.SimpleAcc
 	return out
 }
 
-func fakeDetail(it sdk.TrackNumber, pickup, transit, latest time.Time) sdk.TrackDetail {
+// FakeDetail builds a 17TRACK-shaped TrackDetail with pickup / transit / latest events.
+func FakeDetail(number string, carrier int, pickup, transit, latest time.Time) sdk.TrackDetail {
+	if carrier <= 0 {
+		carrier = NopCarrierKey
+	}
 	pickupEv := sdk.TrackEvent{
 		TimeISO:     pickup.Format(time.RFC3339),
 		TimeUTC:     pickup.UTC().Format(time.RFC3339),
@@ -100,8 +109,8 @@ func fakeDetail(it sdk.TrackNumber, pickup, transit, latest time.Time) sdk.Track
 		SubStatus:   "",
 	}
 	return sdk.TrackDetail{
-		Number:  it.Number,
-		Carrier: it.Carrier,
+		Number:  number,
+		Carrier: carrier,
 		Tag:     "nop",
 		Lang:    "en",
 		TrackInfo: &sdk.TrackInfo{
@@ -113,7 +122,7 @@ func fakeDetail(it sdk.TrackNumber, pickup, transit, latest time.Time) sdk.Track
 			Tracking: &sdk.Tracking{
 				Providers: []sdk.ProviderPackage{{
 					Provider: &sdk.ProviderInfo{
-						Key:      it.Carrier,
+						Key:      carrier,
 						Name:     "NOP Carrier",
 						Alias:    "nop",
 						Homepage: "https://nop.tracking.local",
@@ -125,6 +134,17 @@ func fakeDetail(it sdk.TrackNumber, pickup, transit, latest time.Time) sdk.Track
 			},
 		},
 	}
+}
+
+// NopWebhookBody builds a raw 17TRACK TRACKING_UPDATED push body
+// ({"event":"TRACKING_UPDATED","data":{…}}) for ApplyWebhookBody / gateway relay.
+func NopWebhookBody(number string, carrier int) ([]byte, error) {
+	now := time.Now().UTC()
+	detail := FakeDetail(number, carrier, now.Add(-48*time.Hour), now.Add(-24*time.Hour), now)
+	return json.Marshal(map[string]any{
+		"event": "TRACKING_UPDATED",
+		"data":  detail,
+	})
 }
 
 var _ Client = (*Nop)(nil)
